@@ -44,6 +44,7 @@ type Compiler struct {
 	file            *parser.SourceFile
 	parent          *Compiler
 	modulePath      string
+	importDir       string
 	constants       []Object
 	symbolTable     *SymbolTable
 	scopes          []compilationScope
@@ -322,7 +323,7 @@ func (c *Compiler) Compile(node parser.Node) error {
 			return err
 		}
 	case *parser.Ident:
-		symbol, _, ok := c.symbolTable.Resolve(node.Name)
+		symbol, _, ok := c.symbolTable.Resolve(node.Name, false)
 		if !ok {
 			return c.errorf(node, "unresolved reference '%s'", node.Name)
 		}
@@ -505,7 +506,11 @@ func (c *Compiler) Compile(node parser.Node) error {
 				return err
 			}
 		}
-		c.emit(node, parser.OpCall, len(node.Args))
+		ellipsis := 0
+		if node.Ellipsis.IsValid() {
+			ellipsis = 1
+		}
+		c.emit(node, parser.OpCall, len(node.Args), ellipsis)
 	case *parser.ImportExpr:
 		if node.ModuleName == "" {
 			return c.errorf(node, "empty module name")
@@ -520,12 +525,12 @@ func (c *Compiler) Compile(node parser.Node) error {
 			switch v := v.(type) {
 			case []byte: // module written in Tengo
 				compiled, err := c.compileModule(node,
-					node.ModuleName, node.ModuleName, v)
+					node.ModuleName, v, false)
 				if err != nil {
 					return err
 				}
 				c.emit(node, parser.OpConstant, c.addConstant(compiled))
-				c.emit(node, parser.OpCall, 0)
+				c.emit(node, parser.OpCall, 0, 0)
 			case Object: // builtin module
 				c.emit(node, parser.OpConstant, c.addConstant(v))
 			default:
@@ -537,29 +542,25 @@ func (c *Compiler) Compile(node parser.Node) error {
 				moduleName += ".tengo"
 			}
 
-			modulePath, err := filepath.Abs(moduleName)
+			modulePath, err := filepath.Abs(
+				filepath.Join(c.importDir, moduleName))
 			if err != nil {
 				return c.errorf(node, "module file path error: %s",
 					err.Error())
 			}
 
-			if err := c.checkCyclicImports(node, modulePath); err != nil {
-				return err
-			}
-
-			moduleSrc, err := ioutil.ReadFile(moduleName)
+			moduleSrc, err := ioutil.ReadFile(modulePath)
 			if err != nil {
 				return c.errorf(node, "module file read error: %s",
 					err.Error())
 			}
 
-			compiled, err := c.compileModule(node,
-				moduleName, modulePath, moduleSrc)
+			compiled, err := c.compileModule(node, modulePath, moduleSrc, true)
 			if err != nil {
 				return err
 			}
 			c.emit(node, parser.OpConstant, c.addConstant(compiled))
-			c.emit(node, parser.OpCall, 0)
+			c.emit(node, parser.OpCall, 0, 0)
 		} else {
 			return c.errorf(node, "module '%s' not found", node.ModuleName)
 		}
@@ -634,6 +635,11 @@ func (c *Compiler) EnableFileImport(enable bool) {
 	c.allowFileImport = enable
 }
 
+// SetImportDir sets the initial import directory path for file imports.
+func (c *Compiler) SetImportDir(dir string) {
+	c.importDir = dir
+}
+
 func (c *Compiler) compileAssign(
 	node parser.Node,
 	lhs, rhs []parser.Expr,
@@ -653,7 +659,7 @@ func (c *Compiler) compileAssign(
 		return c.errorf(node, "operator ':=' not allowed with selector")
 	}
 
-	symbol, depth, exists := c.symbolTable.Resolve(ident)
+	symbol, depth, exists := c.symbolTable.Resolve(ident, false)
 	if op == token.Define {
 		if depth == 0 && exists {
 			return c.errorf(node, "'%s' redeclared in this block", ident)
@@ -847,8 +853,8 @@ func (c *Compiler) compileForInStmt(stmt *parser.ForInStmt) error {
 	//     ... body ...
 	//   }
 	//
-	// ":it" is a local variable but will be conflict with other user variables
-	// because character ":" is not allowed.
+	// ":it" is a local variable but it will not conflict with other user variables
+	// because character ":" is not allowed in the variable names.
 
 	// init
 	//   :it = iterator(iterable)
@@ -893,6 +899,7 @@ func (c *Compiler) compileForInStmt(stmt *parser.ForInStmt) error {
 		if keySymbol.Scope == ScopeGlobal {
 			c.emit(stmt, parser.OpSetGlobal, keySymbol.Index)
 		} else {
+			keySymbol.LocalAssigned = true
 			c.emit(stmt, parser.OpDefineLocal, keySymbol.Index)
 		}
 	}
@@ -909,6 +916,7 @@ func (c *Compiler) compileForInStmt(stmt *parser.ForInStmt) error {
 		if valueSymbol.Scope == ScopeGlobal {
 			c.emit(stmt, parser.OpSetGlobal, valueSymbol.Index)
 		} else {
+			valueSymbol.LocalAssigned = true
 			c.emit(stmt, parser.OpDefineLocal, valueSymbol.Index)
 		}
 	}
@@ -955,8 +963,9 @@ func (c *Compiler) checkCyclicImports(
 
 func (c *Compiler) compileModule(
 	node parser.Node,
-	moduleName, modulePath string,
+	modulePath string,
 	src []byte,
+	isFile bool,
 ) (*CompiledFunction, error) {
 	if err := c.checkCyclicImports(node, modulePath); err != nil {
 		return nil, err
@@ -967,7 +976,7 @@ func (c *Compiler) compileModule(
 		return compiledModule, nil
 	}
 
-	modFile := c.file.Set().AddFile(moduleName, -1, len(src))
+	modFile := c.file.Set().AddFile(modulePath, -1, len(src))
 	p := parser.NewParser(modFile, src, nil)
 	file, err := p.ParseFile()
 	if err != nil {
@@ -984,7 +993,7 @@ func (c *Compiler) compileModule(
 	symbolTable = symbolTable.Fork(false)
 
 	// compile module
-	moduleCompiler := c.fork(modFile, modulePath, symbolTable)
+	moduleCompiler := c.fork(modFile, modulePath, symbolTable, isFile)
 	if err := moduleCompiler.Compile(file); err != nil {
 		return nil, err
 	}
@@ -1082,10 +1091,16 @@ func (c *Compiler) fork(
 	file *parser.SourceFile,
 	modulePath string,
 	symbolTable *SymbolTable,
+	isFile bool,
 ) *Compiler {
 	child := NewCompiler(file, symbolTable, nil, c.modules, c.trace)
 	child.modulePath = modulePath // module file path
 	child.parent = c              // parent to set to current compiler
+	child.allowFileImport = c.allowFileImport
+	child.importDir = c.importDir
+	if isFile && c.importDir != "" {
+		child.importDir = filepath.Dir(modulePath)
+	}
 	return child
 }
 
@@ -1192,6 +1207,7 @@ func (c *Compiler) optimizeFunc(node parser.Node) {
 	var lastOp parser.Opcode
 	var appendReturn bool
 	endPos := len(c.scopes[c.scopeIndex].Instructions)
+	newEndPost := len(newInsts)
 	iterateInstructions(newInsts,
 		func(pos int, opcode parser.Opcode, operands []int) bool {
 			switch opcode {
@@ -1204,6 +1220,8 @@ func (c *Compiler) optimizeFunc(node parser.Node) {
 				} else if endPos == operands[0] {
 					// there's a jump instruction that jumps to the end of
 					// function compiler should append "return".
+					copy(newInsts[pos:],
+						MakeInstruction(opcode, newEndPost))
 					appendReturn = true
 				} else {
 					panic(fmt.Errorf("invalid jump position: %d", newDst))

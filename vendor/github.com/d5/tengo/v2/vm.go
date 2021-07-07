@@ -80,14 +80,14 @@ func (v *VM) Run() (err error) {
 	if err != nil {
 		filePos := v.fileSet.Position(
 			v.curFrame.fn.SourcePos(v.ip - 1))
-		err = fmt.Errorf("Runtime Error: %s\n\tat %s",
-			err.Error(), filePos)
+		err = fmt.Errorf("Runtime Error: %w\n\tat %s",
+			err, filePos)
 		for v.framesIndex > 1 {
 			v.framesIndex--
 			v.curFrame = &v.frames[v.framesIndex-1]
 			filePos = v.fileSet.Position(
 				v.curFrame.fn.SourcePos(v.curFrame.ip - 1))
-			err = fmt.Errorf("%s\n\tat %s", err.Error(), filePos)
+			err = fmt.Errorf("%w\n\tat %s", err, filePos)
 		}
 		return err
 	}
@@ -537,12 +537,36 @@ func (v *VM) run() {
 			}
 		case parser.OpCall:
 			numArgs := int(v.curInsts[v.ip+1])
-			v.ip++
+			spread := int(v.curInsts[v.ip+2])
+			v.ip += 2
+
 			value := v.stack[v.sp-1-numArgs]
 			if !value.CanCall() {
 				v.err = fmt.Errorf("not callable: %s", value.TypeName())
 				return
 			}
+
+			if spread == 1 {
+				v.sp--
+				switch arr := v.stack[v.sp].(type) {
+				case *Array:
+					for _, item := range arr.Value {
+						v.stack[v.sp] = item
+						v.sp++
+					}
+					numArgs += len(arr.Value) - 1
+				case *ImmutableArray:
+					for _, item := range arr.Value {
+						v.stack[v.sp] = item
+						v.sp++
+					}
+					numArgs += len(arr.Value) - 1
+				default:
+					v.err = fmt.Errorf("not an array: %s", arr.TypeName())
+					return
+				}
+			}
+
 			if callee, ok := value.(*CompiledFunction); ok {
 				if callee.VarArgs {
 					// if the closure is variadic,

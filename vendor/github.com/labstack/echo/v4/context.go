@@ -43,6 +43,7 @@ type (
 
 		// RealIP returns the client's network address based on `X-Forwarded-For`
 		// or `X-Real-IP` request header.
+		// The behavior can be configured using `Echo#IPExtractor`.
 		RealIP() string
 
 		// Path returns the registered path for the handler.
@@ -245,7 +246,7 @@ func (c *context) IsTLS() bool {
 
 func (c *context) IsWebSocket() bool {
 	upgrade := c.request.Header.Get(HeaderUpgrade)
-	return strings.ToLower(upgrade) == "websocket"
+	return strings.EqualFold(upgrade, "websocket")
 }
 
 func (c *context) Scheme() string {
@@ -270,8 +271,16 @@ func (c *context) Scheme() string {
 }
 
 func (c *context) RealIP() string {
+	if c.echo != nil && c.echo.IPExtractor != nil {
+		return c.echo.IPExtractor(c.request)
+	}
+	// Fall back to legacy behavior
 	if ip := c.request.Header.Get(HeaderXForwardedFor); ip != "" {
-		return strings.Split(ip, ", ")[0]
+		i := strings.IndexAny(ip, ", ")
+		if i > 0 {
+			return ip[:i]
+		}
+		return ip
 	}
 	if ip := c.request.Header.Get(HeaderXRealIP); ip != "" {
 		return ip
@@ -305,6 +314,19 @@ func (c *context) ParamNames() []string {
 
 func (c *context) SetParamNames(names ...string) {
 	c.pnames = names
+
+	l := len(names)
+	if *c.echo.maxParam < l {
+		*c.echo.maxParam = l
+	}
+
+	if len(c.pvalues) < l {
+		// Keeping the old pvalues just for backward compatibility, but it sounds that doesn't make sense to keep them,
+		// probably those values will be overriden in a Context#SetParamValues
+		newPvalues := make([]string, l)
+		copy(newPvalues, c.pvalues)
+		c.pvalues = newPvalues
+	}
 }
 
 func (c *context) ParamValues() []string {
@@ -312,7 +334,15 @@ func (c *context) ParamValues() []string {
 }
 
 func (c *context) SetParamValues(values ...string) {
-	c.pvalues = values
+	// NOTE: Don't just set c.pvalues = values, because it has to have length c.echo.maxParam at all times
+	// It will brake the Router#Find code
+	limit := len(values)
+	if limit > *c.echo.maxParam {
+		limit = *c.echo.maxParam
+	}
+	for i := 0; i < limit; i++ {
+		c.pvalues[i] = values[i]
+	}
 }
 
 func (c *context) QueryParam(name string) string {
@@ -352,8 +382,11 @@ func (c *context) FormParams() (url.Values, error) {
 
 func (c *context) FormFile(name string) (*multipart.FileHeader, error) {
 	f, fh, err := c.request.FormFile(name)
-	defer f.Close()
-	return fh, err
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	return fh, nil
 }
 
 func (c *context) MultipartForm() (*multipart.Form, error) {

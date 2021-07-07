@@ -1,8 +1,12 @@
 package bxmpp
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +27,17 @@ type Bxmpp struct {
 	xmppMap   map[string]string
 	connected bool
 	sync.RWMutex
+
+	avatarAvailability map[string]bool
+	avatarMap          map[string]string
 }
 
 func New(cfg *bridge.Config) bridge.Bridger {
 	return &Bxmpp{
-		Config:  cfg,
-		xmppMap: make(map[string]string),
+		Config:             cfg,
+		xmppMap:            make(map[string]string),
+		avatarAvailability: make(map[string]bool),
+		avatarMap:          make(map[string]string),
 	}
 }
 
@@ -67,17 +76,35 @@ func (b *Bxmpp) Send(msg config.Message) (string, error) {
 	if msg.Event == config.EventMsgDelete {
 		return "", nil
 	}
+
 	b.Log.Debugf("=> Receiving %#v", msg)
 
+	if msg.Event == config.EventAvatarDownload {
+		return b.cacheAvatar(&msg), nil
+	}
+
+	// Make a action /me of the message, prepend the username with it.
+	// https://xmpp.org/extensions/xep-0245.html
+	if msg.Event == config.EventUserAction {
+		msg.Username = "/me " + msg.Username
+	}
+
 	// Upload a file (in XMPP case send the upload URL because XMPP has no native upload support).
+	var err error
 	if msg.Extra != nil {
 		for _, rmsg := range helper.HandleExtra(&msg, b.General) {
 			b.Log.Debugf("=> Sending attachement message %#v", rmsg)
-			if _, err := b.xc.Send(xmpp.Chat{
-				Type:   "groupchat",
-				Remote: rmsg.Channel + "@" + b.GetString("Muc"),
-				Text:   rmsg.Username + rmsg.Text,
-			}); err != nil {
+			if b.GetString("WebhookURL") != "" {
+				err = b.postSlackCompatibleWebhook(msg)
+			} else {
+				_, err = b.xc.Send(xmpp.Chat{
+					Type:   "groupchat",
+					Remote: rmsg.Channel + "@" + b.GetString("Muc"),
+					Text:   rmsg.Username + rmsg.Text,
+				})
+			}
+
+			if err != nil {
 				b.Log.WithError(err).Error("Unable to send message with share URL.")
 			}
 		}
@@ -86,13 +113,24 @@ func (b *Bxmpp) Send(msg config.Message) (string, error) {
 		}
 	}
 
+	if b.GetString("WebhookURL") != "" {
+		b.Log.Debugf("Sending message using Webhook")
+		err := b.postSlackCompatibleWebhook(msg)
+		if err != nil {
+			b.Log.Errorf("Failed to send message using webhook: %s", err)
+			return "", err
+		}
+
+		return "", nil
+	}
+
+	// Post normal message.
 	var msgReplaceID string
 	msgID := xid.New().String()
 	if msg.ID != "" {
 		msgID = msg.ID
 		msgReplaceID = msg.ID
 	}
-	// Post normal message.
 	b.Log.Debugf("=> Sending message %#v", msg)
 	if _, err := b.xc.Send(xmpp.Chat{
 		Type:      "groupchat",
@@ -106,6 +144,30 @@ func (b *Bxmpp) Send(msg config.Message) (string, error) {
 	return msgID, nil
 }
 
+func (b *Bxmpp) postSlackCompatibleWebhook(msg config.Message) error {
+	type XMPPWebhook struct {
+		Username string `json:"username"`
+		Text     string `json:"text"`
+	}
+	webhookBody, err := json.Marshal(XMPPWebhook{
+		Username: msg.Username,
+		Text:     msg.Text,
+	})
+	if err != nil {
+		b.Log.Errorf("Failed to marshal webhook: %s", err)
+		return err
+	}
+
+	resp, err := http.Post(b.GetString("WebhookURL")+"/"+url.QueryEscape(msg.Channel), "application/json", bytes.NewReader(webhookBody))
+	if err != nil {
+		b.Log.Errorf("Failed to POST webhook: %s", err)
+		return err
+	}
+
+	resp.Body.Close()
+	return nil
+}
+
 func (b *Bxmpp) createXMPP() error {
 	if !strings.Contains(b.GetString("Jid"), "@") {
 		return fmt.Errorf("the Jid %s doesn't contain an @", b.GetString("Jid"))
@@ -114,20 +176,22 @@ func (b *Bxmpp) createXMPP() error {
 		ServerName:         strings.Split(b.GetString("Jid"), "@")[1],
 		InsecureSkipVerify: b.GetBool("SkipTLSVerify"), // nolint: gosec
 	}
+
+	xmpp.DebugWriter = b.Log.Writer()
+
 	options := xmpp.Options{
 		Host:                         b.GetString("Server"),
 		User:                         b.GetString("Jid"),
 		Password:                     b.GetString("Password"),
 		NoTLS:                        true,
-		StartTLS:                     true,
+		StartTLS:                     !b.GetBool("NoTLS"),
 		TLSConfig:                    tc,
 		Debug:                        b.GetBool("debug"),
-		Logger:                       b.Log.Writer(),
 		Session:                      true,
 		Status:                       "",
 		StatusMessage:                "",
 		Resource:                     "",
-		InsecureAllowUnencryptedAuth: false,
+		InsecureAllowUnencryptedAuth: b.GetBool("NoTLS"),
 	}
 	var err error
 	b.xc, err = options.NewClient()
@@ -228,6 +292,16 @@ func (b *Bxmpp) handleXMPP() error {
 					event = config.EventTopicChange
 				}
 
+				available, sok := b.avatarAvailability[v.Remote]
+				avatar := ""
+				if !sok {
+					b.Log.Debugf("Requesting avatar data")
+					b.avatarAvailability[v.Remote] = false
+					b.xc.AvatarRequestData(v.Remote)
+				} else if available {
+					avatar = getAvatar(b.avatarMap, v.Remote, b.General)
+				}
+
 				msgID := v.ID
 				if v.ReplaceID != "" {
 					msgID = v.ReplaceID
@@ -237,6 +311,7 @@ func (b *Bxmpp) handleXMPP() error {
 					Text:     v.Text,
 					Channel:  b.parseChannel(v.Remote),
 					Account:  b.Account,
+					Avatar:   avatar,
 					UserID:   v.Remote,
 					ID:       msgID,
 					Event:    event,
@@ -253,6 +328,10 @@ func (b *Bxmpp) handleXMPP() error {
 				b.Log.Debugf("<= Message is %#v", rmsg)
 				b.Remote <- rmsg
 			}
+		case xmpp.AvatarData:
+			b.handleDownloadAvatar(v)
+			b.avatarAvailability[v.From] = true
+			b.Log.Debugf("Avatar for %s is now available", v.From)
 		case xmpp.Presence:
 			// Do nothing.
 		}
@@ -342,6 +421,11 @@ func (b *Bxmpp) skipMessage(message xmpp.Chat) bool {
 
 	// do not show subjects on connect #732
 	if strings.Contains(message.Text, "has set the subject to:") && time.Since(b.startTime) < time.Second*5 {
+		return true
+	}
+
+	// Ignore messages posted by our webhook
+	if b.GetString("WebhookURL") != "" && strings.Contains(message.ID, "webhookbot") {
 		return true
 	}
 

@@ -6,8 +6,32 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/matterbridge/discordgo"
 )
+
+func (b *Bdiscord) getAllowedMentions() *discordgo.MessageAllowedMentions {
+	// If AllowMention is not specified, then allow all mentions (default Discord behavior)
+	if !b.IsKeySet("AllowMention") {
+		return nil
+	}
+
+	// Otherwise, allow only the mentions that are specified
+	allowedMentionTypes := make([]discordgo.AllowedMentionType, 0, 3)
+	for _, m := range b.GetStringSlice("AllowMention") {
+		switch m {
+		case "everyone":
+			allowedMentionTypes = append(allowedMentionTypes, discordgo.AllowedMentionTypeEveryone)
+		case "roles":
+			allowedMentionTypes = append(allowedMentionTypes, discordgo.AllowedMentionTypeRoles)
+		case "users":
+			allowedMentionTypes = append(allowedMentionTypes, discordgo.AllowedMentionTypeUsers)
+		}
+	}
+
+	return &discordgo.MessageAllowedMentions{
+		Parse: allowedMentionTypes,
+	}
+}
 
 func (b *Bdiscord) getNick(user *discordgo.User, guildID string) string {
 	b.membersMutex.RLock()
@@ -137,6 +161,7 @@ var (
 	// See https://discordapp.com/developers/docs/reference#message-formatting.
 	channelMentionRE = regexp.MustCompile("<#[0-9]+>")
 	userMentionRE    = regexp.MustCompile("@[^@\n]{1,32}")
+	emoteRE          = regexp.MustCompile(`<a?(:\w+:)\d+>`)
 )
 
 func (b *Bdiscord) replaceChannelMentions(text string) string {
@@ -182,15 +207,20 @@ func (b *Bdiscord) replaceUserMentions(text string) string {
 	return userMentionRE.ReplaceAllStringFunc(text, replaceUserMentionFunc)
 }
 
+func replaceEmotes(text string) string {
+	return emoteRE.ReplaceAllString(text, "$1")
+}
+
 func (b *Bdiscord) replaceAction(text string) (string, bool) {
-	if strings.HasPrefix(text, "_") && strings.HasSuffix(text, "_") {
-		return text[1 : len(text)-1], true
+	length := len(text)
+	if length > 1 && text[0] == '_' && text[length-1] == '_' {
+		return text[1 : length-1], true
 	}
 	return text, false
 }
 
 // splitURL splits a webhookURL and returns the ID and token.
-func (b *Bdiscord) splitURL(url string) (string, string) {
+func (b *Bdiscord) splitURL(url string) (string, string, bool) {
 	const (
 		expectedWebhookSplitCount = 7
 		webhookIdxID              = 5
@@ -198,9 +228,9 @@ func (b *Bdiscord) splitURL(url string) (string, string) {
 	)
 	webhookURLSplit := strings.Split(url, "/")
 	if len(webhookURLSplit) != expectedWebhookSplitCount {
-		b.Log.Fatalf("%s is no correct discord WebhookURL", url)
+		return "", "", false
 	}
-	return webhookURLSplit[webhookIdxID], webhookURLSplit[webhookIdxToken]
+	return webhookURLSplit[webhookIdxID], webhookURLSplit[webhookIdxToken], true
 }
 
 func enumerateUsernames(s string) []string {

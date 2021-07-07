@@ -1,18 +1,22 @@
 package bslack
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"time"
 
 	"github.com/42wim/matterbridge/bridge/config"
 	"github.com/42wim/matterbridge/bridge/helper"
-	"github.com/nlopes/slack"
+	"github.com/slack-go/slack"
 )
+
+// ErrEventIgnored is for events that should be ignored
+var ErrEventIgnored = errors.New("this event message should ignored")
 
 func (b *Bslack) handleSlack() {
 	messages := make(chan *config.Message)
-	if b.GetString(incomingWebhookConfig) != "" {
+	if b.GetString(incomingWebhookConfig) != "" && b.GetString(tokenConfig) == "" {
 		b.Log.Debugf("Choosing webhooks based receiving")
 		go b.handleMatterHook(messages)
 	} else {
@@ -53,7 +57,9 @@ func (b *Bslack) handleSlackClient(messages chan *config.Message) {
 				continue
 			}
 			rmsg, err := b.handleTypingEvent(ev)
-			if err != nil {
+			if err == ErrEventIgnored {
+				continue
+			} else if err != nil {
 				b.Log.Errorf("%#v", err)
 				continue
 			}
@@ -87,7 +93,7 @@ func (b *Bslack) handleSlackClient(messages chan *config.Message) {
 			b.Log.Errorf("Connection failed %#v %#v", ev.Error(), ev.ErrorObj)
 		case *slack.MemberJoinedChannelEvent:
 			b.users.populateUser(ev.User)
-		case *slack.HelloEvent, *slack.LatencyReport:
+		case *slack.HelloEvent, *slack.LatencyReport, *slack.ConnectingEvent:
 			continue
 		default:
 			b.Log.Debugf("Unhandled incoming event: %T", ev)
@@ -124,11 +130,11 @@ func (b *Bslack) skipMessageEvent(ev *slack.MessageEvent) bool {
 		}
 	}
 
-	// Skip any messages that we made ourselves or from 'slackbot' (see #527).
-	if ev.Username == sSlackBotUser ||
-		(b.rtm != nil && ev.Username == b.si.User.Name) ||
-		(len(ev.Attachments) > 0 && ev.Attachments[0].CallbackID == "matterbridge_"+b.uuid) {
-		return true
+	// Check for our callback ID
+	hasOurCallbackID := false
+	if len(ev.Blocks.BlockSet) == 1 {
+		block, ok := ev.Blocks.BlockSet[0].(*slack.SectionBlock)
+		hasOurCallbackID = ok && block.BlockID == "matterbridge_"+b.uuid
 	}
 
 	if ev.SubMessage != nil {
@@ -143,6 +149,16 @@ func (b *Bslack) skipMessageEvent(ev *slack.MessageEvent) bool {
 		if ev.SubType == "message_replied" && ev.Hidden {
 			return true
 		}
+		if len(ev.SubMessage.Blocks.BlockSet) == 1 {
+			block, ok := ev.SubMessage.Blocks.BlockSet[0].(*slack.SectionBlock)
+			hasOurCallbackID = ok && block.BlockID == "matterbridge_"+b.uuid
+		}
+	}
+
+	// Skip any messages that we made ourselves or from 'slackbot' (see #527).
+	if ev.Username == sSlackBotUser ||
+		(b.rtm != nil && ev.Username == b.si.User.Name) || hasOurCallbackID {
+		return true
 	}
 
 	if len(ev.Files) > 0 {
@@ -270,6 +286,9 @@ func (b *Bslack) handleAttachments(ev *slack.MessageEvent, rmsg *config.Message)
 }
 
 func (b *Bslack) handleTypingEvent(ev *slack.UserTypingEvent) (*config.Message, error) {
+	if ev.User == b.si.User.ID {
+		return nil, ErrEventIgnored
+	}
 	channelInfo, err := b.channels.getChannelByID(ev.Channel)
 	if err != nil {
 		return nil, err

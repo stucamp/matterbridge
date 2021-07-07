@@ -13,8 +13,8 @@ import (
 	"github.com/42wim/matterbridge/bridge/helper"
 	"github.com/42wim/matterbridge/matterhook"
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/nlopes/slack"
 	"github.com/rs/xid"
+	"github.com/slack-go/slack"
 )
 
 type Bslack struct {
@@ -64,6 +64,7 @@ const (
 	editSuffixConfig      = "EditSuffix"
 	iconURLConfig         = "iconurl"
 	noSendJoinConfig      = "nosendjoinpart"
+	messageLength         = 3000
 )
 
 func New(cfg *bridge.Config) bridge.Bridger {
@@ -155,7 +156,7 @@ func (b *Bslack) JoinChannel(channel config.ChannelInfo) error {
 
 	// try to join a channel when in legacy
 	if b.legacy {
-		_, err := b.sc.JoinChannel(channel.Name)
+		_, _, _, err := b.sc.JoinConversation(channel.Name)
 		if err != nil {
 			switch err.Error() {
 			case "name_taken", "restricted_action":
@@ -194,6 +195,7 @@ func (b *Bslack) Send(msg config.Message) (string, error) {
 		b.Log.Debugf("=> Receiving %#v", msg)
 	}
 
+	msg.Text = helper.ClipMessage(msg.Text, messageLength, b.GetString("MessageClipped"))
 	msg.Text = b.replaceCodeFence(msg.Text)
 
 	// Make a action /me of the message
@@ -202,7 +204,7 @@ func (b *Bslack) Send(msg config.Message) (string, error) {
 	}
 
 	// Use webhook to send the message
-	if b.GetString(outgoingWebhookConfig) != "" {
+	if b.GetString(outgoingWebhookConfig) != "" && b.GetString(tokenConfig) == "" {
 		return "", b.sendWebhook(msg)
 	}
 	return b.sendRTM(msg)
@@ -297,7 +299,7 @@ func (b *Bslack) sendRTM(msg config.Message) (string, error) {
 	}
 
 	// Handle prefix hint for unthreaded messages.
-	if msg.ParentID == "msg-parent-not-found" {
+	if msg.ParentNotFound() {
 		msg.ParentID = ""
 		msg.Text = fmt.Sprintf("[thread]: %s", msg.Text)
 	}
@@ -408,7 +410,6 @@ func (b *Bslack) editMessage(msg *config.Message, channelInfo *slack.Channel) (b
 	}
 	messageOptions := b.prepareMessageOptions(msg)
 	for {
-		messageOptions = append(messageOptions, slack.MsgOptionText(msg.Text, false))
 		_, _, _, err := b.rtm.UpdateMessage(channelInfo.ID, msg.ID, messageOptions...)
 		if err == nil {
 			return true, nil
@@ -427,11 +428,6 @@ func (b *Bslack) postMessage(msg *config.Message, channelInfo *slack.Channel) (s
 		return "", nil
 	}
 	messageOptions := b.prepareMessageOptions(msg)
-	messageOptions = append(
-		messageOptions,
-		slack.MsgOptionText(msg.Text, false),
-		slack.MsgOptionEnableLinkUnfurl(),
-	)
 	for {
 		_, id, err := b.rtm.PostMessage(channelInfo.ID, messageOptions...)
 		if err == nil {
@@ -497,8 +493,6 @@ func (b *Bslack) prepareMessageOptions(msg *config.Message) []slack.MsgOption {
 	}
 
 	var attachments []slack.Attachment
-	// add a callback ID so we can see we created it
-	attachments = append(attachments, slack.Attachment{CallbackID: "matterbridge_" + b.uuid})
 	// add file attachments
 	attachments = append(attachments, b.createAttach(msg.Extra)...)
 	// add slack attachments (from another slack bridge)
@@ -509,6 +503,19 @@ func (b *Bslack) prepareMessageOptions(msg *config.Message) []slack.MsgOption {
 	}
 
 	var opts []slack.MsgOption
+	opts = append(opts,
+		// provide regular text field (fallback used in Slack notifications, etc.)
+		slack.MsgOptionText(msg.Text, false),
+
+		// add a callback ID so we can see we created it
+		slack.MsgOptionBlocks(slack.NewSectionBlock(
+			slack.NewTextBlockObject(slack.MarkdownType, msg.Text, false, false),
+			nil, nil,
+			slack.SectionBlockOptionBlockID("matterbridge_"+b.uuid),
+		)),
+
+		slack.MsgOptionEnableLinkUnfurl(),
+	)
 	opts = append(opts, slack.MsgOptionAttachments(attachments...))
 	opts = append(opts, slack.MsgOptionPostMessageParameters(params))
 	return opts

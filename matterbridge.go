@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/42wim/matterbridge/bridge/config"
@@ -15,7 +16,7 @@ import (
 )
 
 var (
-	version = "1.16.4-dev"
+	version = "1.22.4-dev"
 	githash string
 
 	flagConfig  = flag.String("conf", "matterbridge.toml", "config file")
@@ -50,6 +51,15 @@ func main() {
 	cfg := config.NewConfig(rootLogger, *flagConfig)
 	cfg.BridgeValues().General.Debug = *flagDebug
 
+	// if logging to a file, ensure it is closed when the program terminates
+	// nolint:errcheck
+	defer func() {
+		if f, ok := rootLogger.Out.(*os.File); ok {
+			f.Sync()
+			f.Close()
+		}
+	}()
+
 	r, err := gateway.NewRouter(rootLogger, cfg, bridgemap.FullMap)
 	if err != nil {
 		logger.Fatalf("Starting gateway failed: %s", err)
@@ -67,17 +77,31 @@ func setupLogger() *logrus.Logger {
 		Formatter: &prefixed.TextFormatter{
 			PrefixPadding: 13,
 			DisableColors: true,
-			FullTimestamp: true,
 		},
 		Level: logrus.InfoLevel,
 	}
 	if *flagDebug || os.Getenv("DEBUG") == "1" {
+		logger.SetReportCaller(true)
 		logger.Formatter = &prefixed.TextFormatter{
-			PrefixPadding:   13,
-			DisableColors:   true,
-			FullTimestamp:   false,
-			ForceFormatting: true,
+			PrefixPadding: 13,
+			DisableColors: true,
+			FullTimestamp: false,
+
+			CallerFormatter: func(function, file string) string {
+				return fmt.Sprintf(" [%s:%s]", function, file)
+			},
+			CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+				sp := strings.SplitAfter(f.File, "/matterbridge/")
+				filename := f.File
+				if len(sp) > 1 {
+					filename = sp[1]
+				}
+				s := strings.Split(f.Function, ".")
+				funcName := s[len(s)-1]
+				return funcName, fmt.Sprintf("%s:%d", filename, f.Line)
+			},
 		}
+
 		logger.Level = logrus.DebugLevel
 		logger.WithFields(logrus.Fields{"prefix": "main"}).Info("Enabling debug logging.")
 	}

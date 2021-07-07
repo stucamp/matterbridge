@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"unicode/utf8"
+
+	"golang.org/x/text/width"
 )
 
 // EscapeCodes contains escape sequences that can be written to the terminal in
@@ -129,6 +131,8 @@ const (
 	keyRight
 	keyAltLeft
 	keyAltRight
+	keyAltF
+	keyAltB
 	keyHome
 	keyEnd
 	keyDeleteWord
@@ -155,8 +159,12 @@ func bytesToKey(b []byte, pasteActive bool) (rune, []byte) {
 		switch b[0] {
 		case 1: // ^A
 			return keyHome, b[1:]
+		case 2: // ^B
+			return keyLeft, b[1:]
 		case 5: // ^E
 			return keyEnd, b[1:]
+		case 6: // ^F
+			return keyRight, b[1:]
 		case 8: // ^H
 			return keyBackspace, b[1:]
 		case 11: // ^K
@@ -206,6 +214,15 @@ func bytesToKey(b []byte, pasteActive bool) (rune, []byte) {
 		}
 	}
 
+	if !pasteActive && len(b) >= 2 && b[0] == keyEscape {
+		switch b[1] {
+		case 'f':
+			return keyAltF, b[2:]
+		case 'b':
+			return keyAltB, b[2:]
+		}
+	}
+
 	if !pasteActive && len(b) >= 6 && bytes.Equal(b[:6], pasteStart) {
 		return keyPasteStart, b[6:]
 	}
@@ -247,7 +264,7 @@ func (t *Terminal) moveCursorToPos(pos int) {
 		return
 	}
 
-	x := visualLength(t.prompt) + pos
+	x := visualLength(t.prompt) + visualLength(t.line[:pos])
 	y := x / t.termWidth
 	x = x % t.termWidth
 
@@ -336,6 +353,7 @@ func (t *Terminal) setLine(newLine []rune, newPos int) {
 		for i := len(newLine); i < len(t.line); i++ {
 			t.writeLine(space)
 		}
+		t.line = newLine
 		t.moveCursorToPos(newPos)
 	}
 	t.line = newLine
@@ -447,6 +465,10 @@ func visualLength(runes []rune) int {
 			inEscapeSeq = true
 		default:
 			length++
+			kind := width.LookupRune(r).Kind()
+			if kind == width.EastAsianFullwidth || kind == width.EastAsianWide {
+				length++
+			}
 		}
 	}
 
@@ -467,10 +489,14 @@ func (t *Terminal) handleKey(key rune) (line string, ok bool) {
 			return
 		}
 		t.eraseNPreviousChars(1)
+	case keyAltB:
+		fallthrough
 	case keyAltLeft:
 		// move left by a word.
 		t.pos -= t.countToLeftWord()
 		t.moveCursorToPos(t.pos)
+	case keyAltF:
+		fallthrough
 	case keyAltRight:
 		// move right by a word.
 		t.pos += t.countToRightWord()

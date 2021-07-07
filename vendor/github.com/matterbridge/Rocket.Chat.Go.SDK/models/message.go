@@ -7,6 +7,7 @@ type Message struct {
 	RoomID   string `json:"rid"`
 	Msg      string `json:"msg"`
 	EditedBy string `json:"editedBy,omitempty"`
+	Type     string `json:"t,omitempty"`
 
 	Groupable bool `json:"groupable,omitempty"`
 
@@ -16,6 +17,9 @@ type Message struct {
 
 	Mentions []User `json:"mentions,omitempty"`
 	User     *User  `json:"u,omitempty"`
+
+	Attachments []Attachment `json:"attachments,omitempty"`
+
 	PostMessage
 
 	// Bot         interface{}  `json:"bot"`
@@ -62,6 +66,9 @@ type Attachment struct {
 	AudioURL string `json:"audio_url,omitempty"`
 	VideoURL string `json:"video_url,omitempty"`
 
+	Actions                []AttachmentAction               `json:"actions,omitempty"`
+	ActionButtonsAlignment AttachmentActionButtonsAlignment `json:"button_alignment,omitempty"`
+
 	Fields []AttachmentField `json:"fields,omitempty"`
 }
 
@@ -70,6 +77,40 @@ type Attachment struct {
 // https://rocket.chat/docs/developer-guides/rest-api/chat/postmessage/
 type AttachmentField struct {
 	Short bool   `json:"short"`
-	Title string `json:"title"`
-	Value string `json:"value"`
+	Title string `json:"title,omitempty"`
+	Value string `json:"value,omitempty"`
 }
+
+type AttachmentActionType string
+
+const (
+	AttachmentActionTypeButton AttachmentActionType = "button"
+)
+
+// AttachmentAction are action buttons on message attachments
+type AttachmentAction struct {
+	Type               AttachmentActionType  `json:"type,omitempty"`
+	Text               string                `json:"text,omitempty"`
+	Url                string                `json:"url,omitempty"`
+	ImageURL           string                `json:"image_url,omitempty"`
+	IsWebView          bool                  `json:"is_webview"`
+	WebviewHeightRatio string                `json:"webview_height_ratio,omitempty"`
+	Msg                string                `json:"msg,omitempty"`
+	MsgInChatWindow    bool                  `json:"msg_in_chat_window"`
+	MsgProcessingType  MessageProcessingType `json:"msg_processing_type,omitempty"`
+}
+
+// AttachmentActionButtonAlignment configures how the actions buttons will be aligned
+type AttachmentActionButtonsAlignment string
+
+const (
+	ActionButtonAlignVertical   AttachmentActionButtonsAlignment = "vertical"
+	ActionButtonAlignHorizontal AttachmentActionButtonsAlignment = "horizontal"
+)
+
+type MessageProcessingType string
+
+const (
+	ProcessingTypeSendMessage        MessageProcessingType = "sendMessage"
+	ProcessingTypeRespondWithMessage MessageProcessingType = "respondWithMessage"
+)

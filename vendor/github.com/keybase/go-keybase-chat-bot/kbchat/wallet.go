@@ -5,32 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/keybase/go-keybase-chat-bot/kbchat/types/stellar1"
 )
 
 type WalletOutput struct {
-	Result WalletResult `json:"result"`
-}
-
-type WalletResult struct {
-	TxID         string      `json:"txID"`
-	Status       string      `json:"status"`
-	Amount       string      `json:"amount"`
-	Asset        WalletAsset `json:"asset"`
-	FromUsername string      `json:"fromUsername"`
-	ToUsername   string      `json:"toUsername"`
-}
-
-type WalletAsset struct {
-	Type   string `json:"type"`
-	Code   string `json:"code"`
-	Issuer string `json:"issuer"`
+	Result stellar1.PaymentCLILocal `json:"result"`
 }
 
 func (a *API) GetWalletTxDetails(txID string) (wOut WalletOutput, err error) {
 	a.Lock()
 	defer a.Unlock()
 
-	apiInput := fmt.Sprintf(`{"method": "details", "params": {"options": {"txid": "%s"}}}`, txID)
+	txIDEscaped, err := json.Marshal(txID)
+	if err != nil {
+		return wOut, err
+	}
+	apiInput := fmt.Sprintf(`{"method": "details", "params": {"options": {"txid": %s}}}`, txIDEscaped)
 	cmd := a.runOpts.Command("wallet", "api")
 	cmd.Stdin = strings.NewReader(apiInput)
 	var out bytes.Buffer

@@ -3,6 +3,8 @@ package config
 import (
 	"bytes"
 	"io/ioutil"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +26,10 @@ const (
 	EventAPIConnected      = "api_connected"
 	EventUserTyping        = "user_typing"
 	EventGetChannelMembers = "get_channel_members"
+	EventNoticeIRC         = "notice_irc"
 )
+
+const ParentIDNotFound = "msg-parent-not-found"
 
 type Message struct {
 	Text      string    `json:"text"`
@@ -40,6 +45,14 @@ type Message struct {
 	Timestamp time.Time `json:"timestamp"`
 	ID        string    `json:"id"`
 	Extra     map[string][]interface{}
+}
+
+func (m Message) ParentNotFound() bool {
+	return m.ParentID == ParentIDNotFound
+}
+
+func (m Message) ParentValid() bool {
+	return m.ParentID != "" && !m.ParentNotFound()
 }
 
 type FileInfo struct {
@@ -72,27 +85,34 @@ type ChannelMember struct {
 type ChannelMembers []ChannelMember
 
 type Protocol struct {
-	AuthCode               string // steam
-	BindAddress            string // mattermost, slack // DEPRECATED
-	Buffer                 int    // api
-	Charset                string // irc
-	ColorNicks             bool   // only irc for now
-	Debug                  bool   // general
-	DebugLevel             int    // only for irc now
-	EditSuffix             string // mattermost, slack, discord, telegram, gitter
-	EditDisable            bool   // mattermost, slack, discord, telegram, gitter
-	IconURL                string // mattermost, slack
-	IgnoreFailureOnStart   bool   // general
-	IgnoreNicks            string // all protocols
-	IgnoreMessages         string // all protocols
-	Jid                    string // xmpp
-	Label                  string // all protocols
-	Login                  string // mattermost, matrix
+	AllowMention           []string // discord
+	AuthCode               string   // steam
+	BindAddress            string   // mattermost, slack // DEPRECATED
+	Buffer                 int      // api
+	Charset                string   // irc
+	ClientID               string   // msteams
+	ColorNicks             bool     // only irc for now
+	Debug                  bool     // general
+	DebugLevel             int      // only for irc now
+	DisableWebPagePreview  bool     // telegram
+	EditSuffix             string   // mattermost, slack, discord, telegram, gitter
+	EditDisable            bool     // mattermost, slack, discord, telegram, gitter
+	HTMLDisable            bool     // matrix
+	IconURL                string   // mattermost, slack
+	IgnoreFailureOnStart   bool     // general
+	IgnoreNicks            string   // all protocols
+	IgnoreMessages         string   // all protocols
+	Jid                    string   // xmpp
+	JoinDelay              string   // all protocols
+	Label                  string   // all protocols
+	Login                  string   // mattermost, matrix
+	LogFile                string   // general
 	MediaDownloadBlackList []string
 	MediaDownloadPath      string // Basically MediaServerUpload, but instead of uploading it, just write it to a file on the same server.
 	MediaDownloadSize      int    // all protocols
 	MediaServerDownload    string
 	MediaServerUpload      string
+	MediaConvertTgs        string     // telegram
 	MediaConvertWebPToPNG  bool       // telegram
 	MessageDelay           int        // IRC, time in millisecond to wait between messages
 	MessageFormat          string     // telegram
@@ -100,6 +120,7 @@ type Protocol struct {
 	MessageQueue           int        // IRC, size of message queue for flood control
 	MessageSplit           bool       // IRC, split long messages with newlines on MessageLength instead of clipping
 	Muc                    string     // xmpp
+	MxID                   string     // matrix
 	Name                   string     // all protocols
 	Nick                   string     // all protocols
 	NickFormatter          string     // mattermost, slack
@@ -109,19 +130,21 @@ type Protocol struct {
 	NicksPerRow            int        // mattermost, slack
 	NoHomeServerSuffix     bool       // matrix
 	NoSendJoinPart         bool       // all protocols
-	NoTLS                  bool       // mattermost
+	NoTLS                  bool       // mattermost, xmpp
 	Password               string     // IRC,mattermost,XMPP,matrix
 	PrefixMessagesWithNick bool       // mattemost, slack
 	PreserveThreading      bool       // slack
 	Protocol               string     // all protocols
 	QuoteDisable           bool       // telegram
 	QuoteFormat            string     // telegram
+	QuoteLengthLimit       int        // telegram
 	RejoinDelay            int        // IRC
 	ReplaceMessages        [][]string // all protocols
 	ReplaceNicks           [][]string // all protocols
 	RemoteNickFormat       string     // all protocols
 	RunCommands            []string   // IRC
-	Server                 string     // IRC,mattermost,XMPP,discord
+	Server                 string     // IRC,mattermost,XMPP,discord,matrix
+	SessionFile            string     // msteams,whatsapp
 	ShowJoinPart           bool       // all protocols
 	ShowTopicChange        bool       // slack
 	ShowUserTyping         bool       // slack
@@ -129,18 +152,22 @@ type Protocol struct {
 	SkipTLSVerify          bool       // IRC, mattermost
 	SkipVersionCheck       bool       // mattermost
 	StripNick              bool       // all protocols
+	StripMarkdown          bool       // irc
 	SyncTopic              bool       // slack
 	TengoModifyMessage     string     // general
 	Team                   string     // mattermost, keybase
-	Token                  string     // gitter, slack, discord, api
+	TeamID                 string     // msteams
+	TenantID               string     // msteams
+	Token                  string     // gitter, slack, discord, api, matrix
 	Topic                  string     // zulip
 	URL                    string     // mattermost, slack // DEPRECATED
 	UseAPI                 bool       // mattermost, slack
+	UseLocalAvatar         []string   // discord
 	UseSASL                bool       // IRC
 	UseTLS                 bool       // IRC
 	UseDiscriminator       bool       // discord
 	UseFirstName           bool       // telegram
-	UseUserName            bool       // discord
+	UseUserName            bool       // discord, matrix
 	UseInsecureURL         bool       // telegram
 	VerboseJoinPart        bool       // IRC
 	WebhookBindAddress     string     // mattermost, slack
@@ -199,6 +226,7 @@ type BridgeValues struct {
 	WhatsApp           map[string]Protocol // TODO is this struct used? Search for "SlackLegacy" for example didn't return any results
 	Zulip              map[string]Protocol
 	Keybase            map[string]Protocol
+	Mumble             map[string]Protocol
 	General            Protocol
 	Tengo              Tengo
 	Gateway            []Gateway
@@ -208,6 +236,7 @@ type BridgeValues struct {
 type Config interface {
 	Viper() *viper.Viper
 	BridgeValues() *BridgeValues
+	IsKeySet(key string) bool
 	GetBool(key string) (bool, bool)
 	GetInt(key string) (int, bool)
 	GetString(key string) (string, bool)
@@ -233,7 +262,17 @@ func NewConfig(rootLogger *logrus.Logger, cfgfile string) Config {
 		logger.Fatalf("Failed to read configuration file: %#v", err)
 	}
 
-	mycfg := newConfigFromString(logger, input)
+	cfgtype := detectConfigType(cfgfile)
+	mycfg := newConfigFromString(logger, input, cfgtype)
+	if mycfg.cv.General.LogFile != "" {
+		logfile, err := os.OpenFile(mycfg.cv.General.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err == nil {
+			logger.Info("Opening log file ", mycfg.cv.General.LogFile)
+			rootLogger.Out = logfile
+		} else {
+			logger.Warn("Failed to open ", mycfg.cv.General.LogFile)
+		}
+	}
 	if mycfg.cv.General.MediaDownloadSize == 0 {
 		mycfg.cv.General.MediaDownloadSize = 1000000
 	}
@@ -244,14 +283,26 @@ func NewConfig(rootLogger *logrus.Logger, cfgfile string) Config {
 	return mycfg
 }
 
+// detectConfigType detects JSON and YAML formats, defaults to TOML.
+func detectConfigType(cfgfile string) string {
+	fileExt := filepath.Ext(cfgfile)
+	switch fileExt {
+	case ".json":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	}
+	return "toml"
+}
+
 // NewConfigFromString instantiates a new configuration based on the specified string.
 func NewConfigFromString(rootLogger *logrus.Logger, input []byte) Config {
 	logger := rootLogger.WithFields(logrus.Fields{"prefix": "config"})
-	return newConfigFromString(logger, input)
+	return newConfigFromString(logger, input, "toml")
 }
 
-func newConfigFromString(logger *logrus.Entry, input []byte) *config {
-	viper.SetConfigType("toml")
+func newConfigFromString(logger *logrus.Entry, input []byte, cfgtype string) *config {
+	viper.SetConfigType(cfgtype)
 	viper.SetEnvPrefix("matterbridge")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	viper.AutomaticEnv()
@@ -277,6 +328,12 @@ func (c *config) BridgeValues() *BridgeValues {
 
 func (c *config) Viper() *viper.Viper {
 	return c.v
+}
+
+func (c *config) IsKeySet(key string) bool {
+	c.RLock()
+	defer c.RUnlock()
+	return c.v.IsSet(key)
 }
 
 func (c *config) GetBool(key string) (bool, bool) {
@@ -336,6 +393,11 @@ type TestConfig struct {
 	Config
 
 	Overrides map[string]interface{}
+}
+
+func (c *TestConfig) IsKeySet(key string) bool {
+	_, ok := c.Overrides[key]
+	return ok || c.Config.IsKeySet(key)
 }
 
 func (c *TestConfig) GetBool(key string) (bool, bool) {

@@ -14,6 +14,14 @@ var builtinFuncs = []*BuiltinFunction{
 		Value: builtinAppend,
 	},
 	{
+		Name:  "delete",
+		Value: builtinDelete,
+	},
+	{
+		Name:  "splice",
+		Value: builtinSplice,
+	},
+	{
 		Name:  "string",
 		Value: builtinString,
 	},
@@ -112,6 +120,10 @@ var builtinFuncs = []*BuiltinFunction{
 	{
 		Name:  "format",
 		Value: builtinFormat,
+	},
+	{
+		Name:  "range",
+		Value: builtinRange,
 	},
 }
 
@@ -315,6 +327,71 @@ func builtinLen(args ...Object) (Object, error) {
 	}
 }
 
+//range(start, stop[, step])
+func builtinRange(args ...Object) (Object, error) {
+	numArgs := len(args)
+	if numArgs < 2 || numArgs > 3 {
+		return nil, ErrWrongNumArguments
+	}
+	var start, stop, step *Int
+
+	for i, arg := range args {
+		v, ok := args[i].(*Int)
+		if !ok {
+			var name string
+			switch i {
+			case 0:
+				name = "start"
+			case 1:
+				name = "stop"
+			case 2:
+				name = "step"
+			}
+
+			return nil, ErrInvalidArgumentType{
+				Name:     name,
+				Expected: "int",
+				Found:    arg.TypeName(),
+			}
+		}
+		if i == 2 && v.Value <= 0 {
+			return nil, ErrInvalidRangeStep
+		}
+		switch i {
+		case 0:
+			start = v
+		case 1:
+			stop = v
+		case 2:
+			step = v
+		}
+	}
+
+	if step == nil {
+		step = &Int{Value: int64(1)}
+	}
+
+	return buildRange(start.Value, stop.Value, step.Value), nil
+}
+
+func buildRange(start, stop, step int64) *Array {
+	array := &Array{}
+	if start <= stop {
+		for i := start; i < stop; i += step {
+			array.Value = append(array.Value, &Int{
+				Value: i,
+			})
+		}
+	} else {
+		for i := start; i > stop; i -= step {
+			array.Value = append(array.Value, &Int{
+				Value: i,
+			})
+		}
+	}
+	return array
+}
+
 func builtinFormat(args ...Object) (Object, error) {
 	numArgs := len(args)
 	if numArgs == 0 {
@@ -499,4 +576,105 @@ func builtinAppend(args ...Object) (Object, error) {
 			Found:    arg.TypeName(),
 		}
 	}
+}
+
+// builtinDelete deletes Map keys
+// usage: delete(map, "key")
+// key must be a string
+func builtinDelete(args ...Object) (Object, error) {
+	argsLen := len(args)
+	if argsLen != 2 {
+		return nil, ErrWrongNumArguments
+	}
+	switch arg := args[0].(type) {
+	case *Map:
+		if key, ok := args[1].(*String); ok {
+			delete(arg.Value, key.Value)
+			return UndefinedValue, nil
+		}
+		return nil, ErrInvalidArgumentType{
+			Name:     "second",
+			Expected: "string",
+			Found:    args[1].TypeName(),
+		}
+	default:
+		return nil, ErrInvalidArgumentType{
+			Name:     "first",
+			Expected: "map",
+			Found:    arg.TypeName(),
+		}
+	}
+}
+
+// builtinSplice deletes and changes given Array, returns deleted items.
+// usage:
+// deleted_items := splice(array[,start[,delete_count[,item1[,item2[,...]]]])
+func builtinSplice(args ...Object) (Object, error) {
+	argsLen := len(args)
+	if argsLen == 0 {
+		return nil, ErrWrongNumArguments
+	}
+
+	array, ok := args[0].(*Array)
+	if !ok {
+		return nil, ErrInvalidArgumentType{
+			Name:     "first",
+			Expected: "array",
+			Found:    args[0].TypeName(),
+		}
+	}
+	arrayLen := len(array.Value)
+
+	var startIdx int
+	if argsLen > 1 {
+		arg1, ok := args[1].(*Int)
+		if !ok {
+			return nil, ErrInvalidArgumentType{
+				Name:     "second",
+				Expected: "int",
+				Found:    args[1].TypeName(),
+			}
+		}
+		startIdx = int(arg1.Value)
+		if startIdx < 0 || startIdx > arrayLen {
+			return nil, ErrIndexOutOfBounds
+		}
+	}
+
+	delCount := len(array.Value)
+	if argsLen > 2 {
+		arg2, ok := args[2].(*Int)
+		if !ok {
+			return nil, ErrInvalidArgumentType{
+				Name:     "third",
+				Expected: "int",
+				Found:    args[2].TypeName(),
+			}
+		}
+		delCount = int(arg2.Value)
+		if delCount < 0 {
+			return nil, ErrIndexOutOfBounds
+		}
+	}
+	// if count of to be deleted items is bigger than expected, truncate it
+	if startIdx+delCount > arrayLen {
+		delCount = arrayLen - startIdx
+	}
+	// delete items
+	endIdx := startIdx + delCount
+	deleted := append([]Object{}, array.Value[startIdx:endIdx]...)
+
+	head := array.Value[:startIdx]
+	var items []Object
+	if argsLen > 3 {
+		items = make([]Object, 0, argsLen-3)
+		for i := 3; i < argsLen; i++ {
+			items = append(items, args[i])
+		}
+	}
+	items = append(items, array.Value[endIdx:]...)
+	array.Value = append(head, items...)
+
+	// return deleted items
+	return &Array{Value: deleted}, nil
 }

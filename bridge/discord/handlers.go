@@ -2,7 +2,7 @@ package bdiscord
 
 import (
 	"github.com/42wim/matterbridge/bridge/config"
-	"github.com/bwmarrin/discordgo"
+	"github.com/matterbridge/discordgo"
 )
 
 func (b *Bdiscord) messageDelete(s *discordgo.Session, m *discordgo.MessageDelete) { //nolint:unparam
@@ -36,6 +36,11 @@ func (b *Bdiscord) messageTyping(s *discordgo.Session, m *discordgo.TypingStart)
 		return
 	}
 
+	// Ignore our own typing messages
+	if m.UserID == b.userID {
+		return
+	}
+
 	rmsg := config.Message{Account: b.Account, Event: config.EventUserTyping}
 	rmsg.Channel = b.getChannelName(m.ChannelID)
 	b.Remote <- rmsg
@@ -64,7 +69,7 @@ func (b *Bdiscord) messageCreate(s *discordgo.Session, m *discordgo.MessageCreat
 		return
 	}
 	// if using webhooks, do not relay if it's ours
-	if b.useWebhook() && m.Author.Bot && b.isWebhookID(m.Author.ID) {
+	if m.Author.Bot && b.transmitter.HasWebhook(m.Author.ID) {
 		return
 	}
 
@@ -90,12 +95,12 @@ func (b *Bdiscord) messageCreate(s *discordgo.Session, m *discordgo.MessageCreat
 	// set channel name
 	rmsg.Channel = b.getChannelName(m.ChannelID)
 
-	// set username
-	if !b.GetBool("UseUserName") {
+	fromWebhook := m.WebhookID != ""
+	if !fromWebhook && !b.GetBool("UseUserName") {
 		rmsg.Username = b.getNick(m.Author, m.GuildID)
 	} else {
 		rmsg.Username = m.Author.Username
-		if b.GetBool("UseDiscriminator") {
+		if !fromWebhook && b.GetBool("UseDiscriminator") {
 			rmsg.Username += "#" + m.Author.Discriminator
 		}
 	}
@@ -103,7 +108,7 @@ func (b *Bdiscord) messageCreate(s *discordgo.Session, m *discordgo.MessageCreat
 	// if we have embedded content add it to text
 	if b.GetBool("ShowEmbeds") && m.Message.Embeds != nil {
 		for _, embed := range m.Message.Embeds {
-			rmsg.Text = rmsg.Text + "embed: " + embed.Title + " - " + embed.Description + " - " + embed.URL + "\n"
+			rmsg.Text += handleEmbed(embed)
 		}
 	}
 
@@ -117,6 +122,14 @@ func (b *Bdiscord) messageCreate(s *discordgo.Session, m *discordgo.MessageCreat
 	rmsg.Text, ok = b.replaceAction(rmsg.Text)
 	if ok {
 		rmsg.Event = config.EventUserAction
+	}
+
+	// Replace emotes
+	rmsg.Text = replaceEmotes(rmsg.Text)
+
+	// Add our parent id if it exists, and if it's not referring to a message in another channel
+	if ref := m.MessageReference; ref != nil && ref.ChannelID == m.ChannelID {
+		rmsg.ParentID = ref.MessageID
 	}
 
 	b.Log.Debugf("<= Sending message from %s on %s to gateway", m.Author.Username, b.Account)
@@ -191,4 +204,34 @@ func (b *Bdiscord) memberRemove(s *discordgo.Session, m *discordgo.GuildMemberRe
 	b.Log.Debugf("<= Sending message from %s to gateway", b.Account)
 	b.Log.Debugf("<= Message is %#v", rmsg)
 	b.Remote <- rmsg
+}
+
+func handleEmbed(embed *discordgo.MessageEmbed) string {
+	var t []string
+	var result string
+
+	t = append(t, embed.Title)
+	t = append(t, embed.Description)
+	t = append(t, embed.URL)
+
+	i := 0
+	for _, e := range t {
+		if e == "" {
+			continue
+		}
+
+		i++
+		if i == 1 {
+			result += " embed: " + e
+			continue
+		}
+
+		result += " - " + e
+	}
+
+	if result != "" {
+		result += "\n"
+	}
+
+	return result
 }
